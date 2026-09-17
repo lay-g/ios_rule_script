@@ -59,7 +59,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(stats["sha256"], build.sha256(path))
 
     def test_parse_rule_invalid_inputs_and_injection(self):
-        for raw in ["IP-CIDR,192.0.2.1/24", "IP-CIDR,192.0.2.0", "IP-CIDR6,192.0.2.0/24",
+        for raw in ["IP-CIDR,192.0.2.1/24", "IP-CIDR6,192.0.2.0/24",
                     "IP-CIDR,2001:db8::/32", "IP-CIDR6,fe80::%eth0/64", "IP-CIDR,999.0.0.0/8", "IP-CIDR,192.0.2.0/24,resolve",
                     "IP-CIDR,192.0.2.0/24,no-resolve,extra", "IP-ASN,123,unknown", "DOMAIN,",
                     "DOMAIN,example.com,no-resolve", "DOMAIN", "UNKNOWN,example.com", "AND,",
@@ -71,6 +71,35 @@ class BuildTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 build.parse_rule(raw)
         self.assertEqual(build.parse_rule("DOMAIN-KEYWORD,-partial.")[1], "keyword:-partial.")
+
+    def test_parse_rule_single_ips_and_literal_underscore_keywords(self):
+        self.assertEqual(build.parse_rule("IP-CIDR,192.0.2.1")[1], "192.0.2.1/32")
+        self.assertEqual(build.parse_rule("IP-CIDR6,2001:4060:1:1005::10:32,no-resolve")[1],
+                         "2001:4060:1:1005::10:32/128")
+        for keyword in ("_vmind.qqvideo.tc.qq.com", "wb_ad"):
+            self.assertEqual(build.parse_rule("DOMAIN-KEYWORD," + keyword)[1], "keyword:" + keyword)
+        for raw in ("IP-CIDR,2001:db8::1", "IP-CIDR6,192.0.2.1", "IP-CIDR6,invalid",
+                    "DOMAIN-SUFFIX,_example.com", "DOMAIN-KEYWORD,wb_ad @ads",
+                    "DOMAIN-KEYWORD,wb_ad#comment", "DOMAIN-KEYWORD,wb_ad:include"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                build.parse_rule(raw)
+
+    def test_parse_rule_mapped_ipv6_compiler_limit_is_narrow(self):
+        for value in ("::ffff:113.248.172.245/128", "::ffff:71f8:acf5/128",
+                      "0:0:0:0:0:ffff:71f8:acf5/128", "::ffff:0:0/96", "::ffff:192.0.2.0/120"):
+            rule = build.parse_rule("IP-CIDR6," + value)
+            self.assertIsNone(rule[1])
+            self.assertIn("pinned GeoIP compiler", rule[3])
+        for value in ("2001:db8::/32", "::fffe:0:0/95", "::/0", "::/80"):
+            self.assertEqual(build.parse_rule("IP-CIDR6," + value)[1], value)
+        for value in ("::ffff:192.0.2.1/120", "::ffff:0:0/95"):
+            with self.assertRaises(ValueError):
+                build.parse_rule("IP-CIDR6," + value)
+        path = self.source("Mapped", "IP-CIDR6,::ffff:113.248.172.245/128,no-resolve\n")
+        sites, ips, stats = build.convert_category(path, allow_empty=True)
+        self.assertFalse(sites or ips)
+        self.assertEqual(stats["skipped"][0]["line"], 1)
+        self.assertEqual(stats["by_rule_type"]["IP-CIDR6"], {"read": 1, "converted": 0, "skipped": 1})
 
     def test_error_source_and_empty_category(self):
         path = self.source("Bad", "# header\nIP-CIDR,192.0.2.1/24\n")
@@ -91,6 +120,58 @@ class BuildTests(unittest.TestCase):
         link.symlink_to(self.root)
         with self.assertRaises(ValueError):
             build.category_paths(["Escape"], self.root)
+
+    def nested_source(self, relative, text="DOMAIN,example.com\n", all_only=False):
+        directory = self.root / "rule/Surge" / relative
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / (directory.name + ("_All" if all_only else "") + ".list")
+        path.write_text(text)
+        return path
+
+    def test_category_paths_recursive_inventory_and_all_preference(self):
+        self.source("Sample", "DOMAIN,main.example\n")
+        preferred = self.nested_source("Sample", all_only=True)
+        only_all = self.nested_source("OnlyAll", all_only=True)
+        child = self.nested_source("Cloud/Child")
+        variant = child.with_name("Child_Resolve.list")
+        variant.write_text("DOMAIN,variant.example\n")
+        inventory = []
+        paths = dict(build.category_paths(root=self.root, inventory=inventory))
+        self.assertEqual(paths, {"sample": preferred, "onlyall": only_all, "child": child})
+        self.assertEqual(dict(build.category_paths(["Sample", "Child"], self.root)),
+                         {"sample": preferred, "child": child})
+        self.assertEqual(build.category_paths(["Cloud/Child"], self.root), [("child", child)])
+        records = {r["directory"]: r for r in inventory}
+        self.assertEqual(records["Cloud"]["status"], "container")
+        self.assertEqual(records["Cloud/Child"]["other_list_files"], [str(variant)])
+        self.assertEqual(len(records), 4)
+
+    def test_category_paths_nested_collisions_and_apostrophes(self):
+        for relative in ("Direct", "AdGuardSDNSFilter/Direct", "Game/Assassin'sCreed-Odyssey",
+                         "Assassin'sCreed/Assassin'sCreed-Odyssey"):
+            self.nested_source(relative)
+        paths = dict(build.category_paths(root=self.root))
+        self.assertEqual(set(paths), {"direct", "adguardsdnsfilter-direct", "game-assassinscreed-odyssey",
+                                     "assassinscreed-assassinscreed-odyssey"})
+        self.assertEqual(build.category_paths(["Direct"], self.root)[0][0], "direct")
+        self.assertEqual(build.category_paths(["AdGuardSDNSFilter/Direct"], self.root)[0][0],
+                         "adguardsdnsfilter-direct")
+        for selection in (["Assassin'sCreed-Odyssey"], ["Game/Assassin'sCreed-Odyssey", "Game/Assassin'sCreed-Odyssey"]):
+            with self.assertRaises(ValueError):
+                build.category_paths(selection, self.root)
+        self.nested_source("Game-AssassinsCreed-Odyssey")
+        with self.assertRaisesRegex(ValueError, "collision"):
+            build.category_paths(root=self.root)
+
+    def test_category_paths_rejects_unaccounted_lists_and_unsafe_names(self):
+        path = self.nested_source("Odd")
+        path.rename(path.with_name("unrelated.list"))
+        with self.assertRaisesRegex(ValueError, "no category"):
+            build.category_paths(root=self.root)
+        path.with_name("unrelated.list").rename(path)
+        self.nested_source("Unsafe@name")
+        with self.assertRaisesRegex(ValueError, "invalid category directory"):
+            build.category_paths(root=self.root)
 
     def test_output_nonempty_refused_without_overwrite(self):
         directory = self.root / "out"
@@ -195,6 +276,39 @@ class BuildTests(unittest.TestCase):
         self.assertFalse((args.output / "routing.json").exists())
         config = json.loads((args.output / "geoip-config.json").read_text())
         self.assertEqual([v["args"]["name"] for v in config["input"]], ["ips"])
+
+    def test_build_all_skips_unsupported_categories_without_empty_entries(self):
+        self.source("Supported", "DOMAIN,example.com\nIP-CIDR,192.0.2.1\n")
+        self.source("ASN", "IP-ASN,123\n")
+        self.source("Unsupported", "USER-AGENT,Example*\nPROCESS-NAME,example\n")
+        self.source("Empty", "# no rules\n")
+        paths = build.category_paths(root=self.root)
+        args = self.args(None)
+        decoded = decoded_data({"supported": {"full:example.com"}}, {"supported": {"192.0.2.1/32"}})
+
+        def compiler(command, output, label, commands):
+            if label == "readback":
+                return json.dumps(decoded)
+            (output / ("geosite.dat" if label == "geosite-build" else "geoip.dat")).write_bytes(b"mock")
+            return ""
+
+        with patch("build.category_paths", return_value=paths), patch("build.tool_info", return_value={"path": sys.executable}), \
+                patch("build.run_tool", side_effect=compiler), redirect_stdout(io.StringIO()):
+            build.build(args)
+        report = json.loads((args.output / "conversion-report.json").read_text())
+        self.assertEqual(report["summary"]["included_categories"], 1)
+        self.assertEqual(report["summary"]["skipped_categories"], 3)
+        self.assertEqual(report["categories"]["asn"]["status"], "skipped")
+        self.assertEqual(report["categories"]["asn"]["skipped"][0]["line"], 1)
+        self.assertNotIn("after_compile", report["categories"]["asn"])
+        self.assertEqual([p.name for p in (args.output / "geosite-input").iterdir()], ["supported"])
+        self.assertEqual([p.name for p in (args.output / "geoip-input").iterdir()], ["supported"])
+        with self.assertRaisesRegex(ValueError, "no supported rules"):
+            build.convert_category(self.root / "rule/Surge/ASN/ASN.list")
+        with patch("build.build") as run:
+            self.assertEqual(build.main(["--geosite-tool", "site", "--geoip-tool", "ip",
+                                         "--geo-reader", "reader", "--output", "out"]), 0)
+            self.assertIsNone(run.call_args.args[0].categories)
 
     def test_cli_errors_never_report_success(self):
         source = self.source("Sample", "DOMAIN,example.com\nIP-CIDR,192.0.2.0/24\n")

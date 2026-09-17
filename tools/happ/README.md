@@ -1,8 +1,8 @@
 # Happ 本地 Geo 构建
 
-从本仓库的 `rule/Surge/<分类>/<分类>.list` 主文件生成 `geosite.dat`、`geoip.dat`，并从实际二进制回读验证。Geo 只保存匹配集合，代理/拦截动作由 Happ 配置决定。**本地构建与回读已通过，Happ 实机待验证。**
+递归扫描本仓库 `rule/Surge/` 全部规则分类，优先读取每个目录中的 `<目录名>_All.list`，没有时才读 `<目录名>.list`，生成 `geosite.dat`、`geoip.dat` 并从实际二进制逐分类回读验证。Geo 只保存匹配集合，代理/拦截动作由 Happ 配置决定。**全量本地构建与回读已通过，Happ 实机待验证。**
 
-只用本仓库规则，不读取 `_All` / `_Resolve`，不采集第三方规则，不处理 ASN、组合条件、复写、MITM 或脚本。无下载服务、上传、发布或自动更新。首批实际验证分类为 OpenAI、Telegram、AdvertisingLite；不宣称其他分类全部可用。
+“全量”指全分类发现与覆盖审计，**不表示每条 Surge 规则均无损转换**：ASN、组合条件、UA、进程、URL 条件不支持；固定 GeoIP 编译器不能保留 IPv4-mapped IPv6，本次 116 行明确跳过，不转换为 IPv4。每条跳过及 `no-resolve` 损失均在报告中。只用本仓库规则；不另读 `_Resolve` 等变体、不采集第三方数据、不处理复写、MITM 或脚本，无下载服务、上传、发布或自动更新。
 
 ## 准备工具（显式执行，仓库外）
 
@@ -48,7 +48,6 @@ python3 tools/happ/build.py --help
 mkdir -p build/happ
 OUT="$(mktemp -d "$PWD/build/happ/build.XXXXXX")"
 python3 tools/happ/build.py \
-  --categories OpenAI Telegram AdvertisingLite \
   --geosite-tool "$TOOLS/bin/domain-list-community" \
   --geoip-tool "$TOOLS/bin/geoip" \
   --geo-reader "$TOOLS/bin/geo-reader" \
@@ -60,7 +59,11 @@ ls -lh "$OUT/geosite.dat" "$OUT/geoip.dat" "$OUT/conversion-report.json"
 
 成功只在两个工具完成且回读全部一致后打印 `Validated ...`。类别引用用无前缀小写名：`openai`、`telegram`、`advertisinglite`。两个上游工具在数据库内部把分类写为大写；回读按小写核对，配置按 Geo 约定引用小写（Happ 行为仍须实机确认）。
 
-`--categories` 可以显式选择其他现有分类的原名；拒绝路径穿越、缺失文件、重名及小写冲突。单类可只包含域名或 IP，但**所选集合整体必须同时有支持的域名和 CIDR**，否则在调用工具前失败。原因是 IP 工具在整体空输入时不写文件，而本命令交付两库；这是入口约束，不是 Happ 单库能力的结论。完全没有支持规则的单类也会失败。
+不传 `--categories` 默认递归全量；传入时按大小写敏感的相对目录路径或唯一叶名选择，仍优先 `_All`，例如 `--categories OpenAI Telegram AdvertisingLite` 或 `--categories Cloud/AmazonCloud OpenAI`。先匹配完整相对路径（所以 `Direct` 指顶层），否则叶名必须唯一；歧义、重复选择、路径穿越、未知目录、符号链接和最终标签冲突均失败。即使显式选择，也检查整棵目录树并保留覆盖清单；出现有 `.list` 却没有同名主文件/完整文件的目录时明确失败，不悄悄漏掉。
+
+标签通常取叶名小写，删除名称中的 apostrophe。只有重名的嵌套分类才用相对路径以 `-` 连接消歧：`Direct` → `direct`，`AdGuardSDNSFilter/Direct` → `adguardsdnsfilter-direct`；`Game/Assassin'sCreed-Odyssey` → `game-assassinscreed-odyssey`。这是必要消歧，不给全部标签加统一前缀；无重名的 `Cloud/AmazonCloud` 仍是 `amazoncloud`。最终归一后的标签再次检查碰撞，不能合并来源。
+
+无自身规则的 `Assassin'sCreed`、`Cloud` 是容器，递归纳入其子类。全量时完全无支持规则的分类记为 `status: skipped`，保留逐行原因，不向任何库写空类别；显式选择该分类仍报错。单类可只包含域名或 IP，但**所选集合整体必须同时有支持的域名和 CIDR**，否则在调用工具前失败。原因是 IP 工具在整体空输入时不写文件，而本命令交付两库；这是入口约束，不是 Happ 单库能力的结论。
 
 项目内的 `build/happ/` 已加入 `.gitignore`，用于保存本地数据库、中间文件和日志，不提交到 Git。每次构建创建独立子目录。
 
@@ -69,19 +72,23 @@ ls -lh "$OUT/geosite.dat" "$OUT/geoip.dat" "$OUT/conversion-report.json"
 ## 转换与报告
 
 - `DOMAIN` → `full:`，`DOMAIN-SUFFIX` → `domain:`，`DOMAIN-KEYWORD` → `keyword:`。保持匹配类型，域名统一小写。同类型同值只写一次，不合并精确/后缀；数字域名仍是域名。
-- 完整域名支持 ASCII DNS 标签或已编码的 punycode；不自动转写 Unicode。关键词允许 `A-Z a-z 0-9 . -` 的非空片段，无须满足完整 DNS 名格式。拒绝空白、`#`、`@`、`&`、冒号等编译器语法注入。其他合法但未支持的格式明确报错，不猜测性改写。
-- `IP-CIDR` / `IP-CIDR6` 严格检查地址族和主机位，标准化为 CIDR。不能把 `192.0.2.1/24` 扩大为 `/24`。不支持带 scope ID 的地址。编译器可能聚合网络；分别折叠 IPv4/IPv6 覆盖集合后比较。
+- 完整域名支持 ASCII DNS 标签或已编码的 punycode；不自动转写 Unicode。关键词允许 `A-Z a-z 0-9 . _ -` 的非空片段，无须满足完整 DNS 名格式。拒绝空白、`#`、`@`、`&`、冒号等编译器语法注入。其他合法但未支持的格式明确报错，不猜测性改写。
+- `IP-CIDR` / `IP-CIDR6` 严格检查地址族和主机位，标准化为 CIDR。不能把 `192.0.2.1/24` 扩大为 `/24`。根据 [Surge 官方 IP 规则文档](https://manual.nssurge.com/rules/ip.html)，无掩码的单 IPv4/IPv6 地址分别等于 `/32`、`/128`，本次 STUN 16 条单 IPv6 已纳入并回读通过。不支持带 scope ID 的地址。编译器可能聚合网络；分别折叠 IPv4/IPv6 覆盖集合后比较。
+- IPv4-mapped IPv6（完全位于 `::ffff:0:0/96` 的网段）是已知工具限制：固定 GeoIP 编译器会解映射并对 `/128` 产生 `AddPrefix(.../-1)` 错误。只跳过此范围并逐行记录 `IPv4-mapped IPv6 cannot be preserved by pinned GeoIP compiler; not converted to IPv4`，不误跳更大的 IPv6 网络，不把 IPv6 规则改成 IPv4；当前 ChinaMax、ChinaMaxNoMedia、ChinaMedia、TencentVideo 各 29 行，共 116 行。
 - 仅 IP 的 `no-resolve` 修饰符可移除，每条转换行记录语义警告。Geo 不能逐条携带 DNS 行为；配置选 `AsIs` 不代表完整保留 Surge 行为。其他参数、未知类型、字段错误明确失败。
 - `IP-ASN`、`AND`、`OR`、`USER-AGENT`、`PROCESS-NAME`、`URL-REGEX` 整行跳过，记录路径、行号、原文、原因。OR 内五个 ASN 只算一条跳过；不抽取 AND 内的域名。
 
 输出包含 `geosite-input/`、`geoip-input/`、只引用本地文本的 `geoip-config.json`、两个 `.dat`、`readback.json`、三份工具日志及 `conversion-report.json`。报告中：
 
 - `status: validated` 才是成功；`validation` 显示分类集、域名类型/值和 CIDR 覆盖一致。
-- `categories` 记录每个源文件路径、SHA-256、`by_rule_type` 读取/转换/跳过的**输入行数**、`skipped` 和 `warnings` 的逐行明细。
+- `selection` 区分全量/显式；`inventory` 列出每个相对目录、标签、首选文件、其他 `.list` 变体及 selected/not_selected/container 状态，确保递归覆盖可核查。`summary` 汇总发现/纳入/跳过分类和规则数量，`elapsed_seconds` 为入口开始至校验完成（不含最终报告写盘）的耗时。
+- `categories` 记录每个所选源文件路径、SHA-256、included/skipped 状态、`by_rule_type` 读取/转换/跳过的**输入行数**、`skipped` 和 `warnings` 的逐行明细。无支持规则分类没有 `after_compile`，也不会出现在任一数据库。
 - `before_compile` 是去重后的输入条目数；`duplicates_removed` 是去重数；`after_compile` 是二进制回读条目数及 IPv4/IPv6 数量。头部 TOTAL 不参与统计。
 - `tools` 记录可执行路径、SHA-256、编译器来源/完整 commit、实际 Go build metadata；`commands` 记录实参、退出码、日志路径；`artifacts` 记录两个数据库大小及 SHA-256。
 
-当前主文件 AdvertisingLite 的头部统计与实际行数不同；入口只统计实际内容。本次三分类实际转换 443 行、跳过 15 行；详情与可复验路径见 `docs/plans/happ-local-geo-build.md`。
+本次实际全量：669 顶层目录、692 总目录（含 2 容器），发现 690 分类、纳入 688、跳过 ChinaASN 和 MOOMusic 两类；19 类选用 `_All`（含仅有 `_All` 的 AdGuardSDNSFilter、EasyPrivacy）。860 个 `.list` 全部在选择/变体清单内。读取 1,434,430 行，转换 1,432,480 行、跳过 1,950 行，64,237 条 `no-resolve` 警告。域名回读 1,340,367 条；CIDR 输入 92,113 条聚合为 65,350 条（IPv4 47,024、IPv6 18,326），覆盖一致。
+
+成功产物位于 `/home/lay/projects/rules/ios_rule_script/build/happ/full.Bu3w6q/`：`geosite.dat` 29,349,986 字节、`geoip.dat` 874,961 字节；完整执行 40.16 秒，峰值 RSS 812,100 KiB。完整覆盖清单见 `conversion-report.json` 的 inventory/categories；本次另保存便于查看的 `coverage.tsv` 和独立再次回读检查记录。规则文件头部 TOTAL 不参与统计。命令、摘要、SHA-256 与诊断证据见 `docs/plans/happ-local-geo-build.md`。
 
 ## 可选 Happ 测试配置
 

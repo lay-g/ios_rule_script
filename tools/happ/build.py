@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +36,9 @@ def sha256(path):
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with path.open("w", encoding="utf-8") as stream:
+        json.dump(value, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
 
 
 def parse_rule(raw):
@@ -63,7 +66,7 @@ def parse_rule(raw):
     value = fields[1]
     if kind in DOMAIN_TYPES:
         # Restrict compiler grammar, not keywords to complete DNS names.
-        if not re.fullmatch(r"[A-Za-z0-9.-]+", value):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+" if kind == "DOMAIN-KEYWORD" else r"[A-Za-z0-9.-]+", value):
             raise ValueError("unsafe/unsupported domain characters (use ASCII or punycode)")
         if kind != "DOMAIN-KEYWORD" and (
             len(value) > 253 or any(
@@ -73,34 +76,80 @@ def parse_rule(raw):
         ):
             raise ValueError("invalid domain name")
         return kind, DOMAIN_TYPES[kind] + ":" + value.lower(), None, None
-    if "/" not in value or "%" in value:
-        raise ValueError("unscoped CIDR with prefix length required")
+    if "%" in value:
+        raise ValueError("scoped IP addresses are not supported")
+    # Surge defines bare IPv4/IPv6 addresses as /32 and /128 respectively.
+    if "/" not in value:
+        address = ipaddress.ip_address(value)
+        value = f"{address}/{address.max_prefixlen}"
     network = ipaddress.ip_network(value, strict=True)
     if network.version != (6 if kind == "IP-CIDR6" else 4):
         raise ValueError(f"address family does not match {kind}")
+    if network.version == 6 and network.prefixlen >= 96 and network.network_address.ipv4_mapped is not None:
+        return kind, None, None, "IPv4-mapped IPv6 cannot be preserved by pinned GeoIP compiler; not converted to IPv4"
     warning = "no-resolve removed; Geo cannot preserve per-rule DNS behavior" if len(fields) == 3 else None
     return kind, str(network), warning, None
 
 
-def category_paths(categories, root=ROOT):
-    names = set()
-    paths = []
+def category_paths(categories=None, root=ROOT, inventory=None):
+    """Inventory every directory; choose one source per category, never merge names."""
     rules = (root / "rule/Surge").resolve()
-    for category in categories:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", category):
-            raise ValueError(f"invalid category name: {category!r}")
-        name = category.lower()
-        if name in names:
-            raise ValueError(f"duplicate/lowercase category collision: {category}")
-        names.add(name)
-        path = (rules / category / (category + ".list")).resolve()
-        if not path.is_relative_to(rules) or not path.is_file():
-            raise ValueError(f"missing or out-of-tree category: {path}")
-        paths.append((name, path))
-    return paths
+    records, candidates = [], {}
+    if not rules.is_dir() or list(rules.glob("*.list")):
+        raise ValueError(f"missing rule directory or uncategorized root lists: {rules}")
+    for directory in sorted(rules.rglob("*")):
+        if directory.is_symlink():
+            raise ValueError(f"symlink in rule tree: {directory}")
+        if not directory.is_dir():
+            continue
+        relative = directory.relative_to(rules).as_posix()
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_'\-]*", part) for part in relative.split("/")):
+            raise ValueError(f"invalid category directory: {relative!r}")
+        files = sorted(directory.glob("*.list"))
+        path = next((p for p in (directory / (directory.name + "_All.list"),
+                                 directory / (directory.name + ".list")) if p.is_file()), None)
+        record = {"directory": relative, "selected_file": str(path) if path else None,
+                  "other_list_files": [str(p) for p in files if p != path]}
+        records.append(record)
+        if path is None:
+            if files or not any(p.is_dir() for p in directory.iterdir()):
+                raise ValueError(f"directory has no category main/_All file: {directory}")
+            record["status"] = "container"
+        else:
+            candidates[relative] = record
+    leaf_counts = {}
+    for relative in candidates:
+        leaf = relative.rsplit("/", 1)[-1].lower()
+        leaf_counts[leaf] = leaf_counts.get(leaf, 0) + 1
+    labels = set()
+    for relative, record in candidates.items():
+        leaf = relative.rsplit("/", 1)[-1]
+        label = (relative.replace("/", "-") if leaf_counts[leaf.lower()] > 1 and "/" in relative else leaf)
+        label = label.replace("'", "").lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", label) or label in labels:
+            raise ValueError(f"unsafe/duplicate/lowercase category collision: {relative} -> {label}")
+        labels.add(label)
+        record["label"] = label
+    selected = []
+    for category in categories if categories is not None else candidates:
+        if category in candidates:
+            relative = category
+        else:
+            matches = [r for r in candidates if r.rsplit("/", 1)[-1] == category]
+            if len(matches) != 1:
+                raise ValueError(f"missing or ambiguous category: {category!r}; use its relative directory path")
+            relative = matches[0]
+        if relative in selected:
+            raise ValueError(f"duplicate category selection: {category}")
+        selected.append(relative)
+    for relative, record in candidates.items():
+        record["status"] = "selected" if relative in selected else "not_selected"
+    if inventory is not None:
+        inventory.extend(records)
+    return [(candidates[r]["label"], Path(candidates[r]["selected_file"])) for r in selected]
 
 
-def convert_category(path):
+def convert_category(path, allow_empty=False):
     sites, ips = set(), set()
     counts = {}
     skipped, warnings = [], []
@@ -126,10 +175,12 @@ def convert_category(path):
             count["converted"] += 1
             if warning:
                 warnings.append({**source, "reason": warning})
-    if not sites and not ips:
+    if not sites and not ips and not allow_empty:
         raise ValueError(f"{path}: category has no supported rules")
     stats = {
         "input": str(path), "sha256": hashlib.sha256(data).hexdigest(),
+        "status": "included" if sites or ips else "skipped",
+        **({"skip_reason": "category has no supported rules"} if not sites and not ips else {}),
         "by_rule_type": counts, "skipped": skipped, "warnings": warnings,
         "before_compile": {"geosite": len(sites), "geoip": len(ips)},
         "duplicates_removed": sum(v["converted"] for v in counts.values()) - len(sites) - len(ips),
@@ -173,7 +224,7 @@ def run_tool(command, output, label, commands):
     log.write_text(result.stdout + result.stderr, encoding="utf-8")
     commands.append({"argv": [str(v) for v in command], "returncode": result.returncode, "log": str(log)})
     if result.returncode:
-        raise ValueError(f"{label} exited {result.returncode}; see {log}: {result.stderr.strip() or result.stdout.strip()}")
+        raise ValueError(f"{label} exited {result.returncode}; see {log}: {(result.stderr.strip() or result.stdout.strip())[:1000]}")
     return result.stdout
 
 
@@ -270,14 +321,16 @@ def write_profile(output, profile):
 
 
 def build(args):
+    started = time.monotonic()
     if (args.geosite_url is None) != (args.geoip_url is None):
         raise ValueError("--geosite-url and --geoip-url must be supplied together")
     output = args.output.resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ValueError(f"output must be an empty directory: {output}")
     sites, ips, categories = {}, {}, {}
-    for name, path in category_paths(args.categories):
-        domains, networks, stats = convert_category(path)
+    inventory = []
+    for name, path in category_paths(args.categories, inventory=inventory):
+        domains, networks, stats = convert_category(path, allow_empty=args.categories is None)
         categories[name] = stats
         if domains:
             sites[name] = domains
@@ -288,7 +341,8 @@ def build(args):
     tools = {kind: tool_info(path, kind) for kind, path in (
         ("geosite", args.geosite_tool), ("geoip", args.geoip_tool), ("reader", args.geo_reader))}
     prepare_output(output)
-    report = {"status": "building", "categories": categories, "tools": tools, "commands": []}
+    report = {"status": "building", "selection": "all" if args.categories is None else "explicit",
+              "inventory": inventory, "categories": categories, "tools": tools, "commands": []}
     try:
         for filename, entries in (("geosite-input", sites), ("geoip-input", ips)):
             directory = output / filename
@@ -309,6 +363,7 @@ def build(args):
         decoded = json.loads(run_tool([tools["reader"]["path"], output / "geosite.dat", output / "geoip.dat"], output, "readback", report["commands"]))
         write_json(output / "readback.json", decoded)
         after = verify_readback(decoded, sites, ips)
+        del decoded
         for name, counts in after.items():
             categories[name]["after_compile"] = counts
         if profile:
@@ -316,11 +371,24 @@ def build(args):
         report["status"] = "validated"
         report["validation"] = {"category_sets": "equal", "domain_types_and_values": "equal", "cidr_coverage": "equal"}
         report["artifacts"] = {f: {"bytes": (output / f).stat().st_size, "sha256": sha256(output / f)} for f in ("geosite.dat", "geoip.dat")}
+        report["summary"] = {
+            "directories": len(inventory),
+            "containers": sum(r["status"] == "container" for r in inventory),
+            "discovered_categories": sum("label" in r for r in inventory),
+            "selected_categories": len(categories),
+            "included_categories": len(after), "skipped_categories": len(categories) - len(after),
+            "geosite_categories": len(sites), "geoip_categories": len(ips),
+            "converted_lines": sum(v["converted"] for c in categories.values() for v in c["by_rule_type"].values()),
+            "skipped_lines": sum(len(c["skipped"]) for c in categories.values()),
+            "before_compile": {key: sum(c["before_compile"][key] for c in categories.values()) for key in ("geosite", "geoip")},
+            "after_compile": {key: sum(c[key] for c in after.values()) for key in ("geosite", "geoip", "geoip_ipv4", "geoip_ipv6")},
+        }
     except (OSError, ValueError, KeyError, TypeError) as exc:
         report["status"] = "failed"
         report["error"] = str(exc)
         raise
     finally:
+        report["elapsed_seconds"] = round(time.monotonic() - started, 3)
         write_json(output / "conversion-report.json", report)
     converted = sum(v["converted"] for c in categories.values() for v in c["by_rule_type"].values())
     skipped = sum(len(c["skipped"]) for c in categories.values())
@@ -329,7 +397,7 @@ def build(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Build both Happ Geo databases locally. Selected categories together must contain domains and CIDRs. Requires Go for pinned tool metadata verification.")
-    parser.add_argument("--categories", nargs="+", required=True, help="Surge main-file category names (case-sensitive)")
+    parser.add_argument("--categories", nargs="+", help="case-sensitive Surge relative directories or unique leaf names; default: all recursively; prefer _All.list")
     parser.add_argument("--geosite-tool", type=Path, required=True)
     parser.add_argument("--geoip-tool", type=Path, required=True)
     parser.add_argument("--geo-reader", type=Path, required=True, help="read-only helper built as documented in README")
