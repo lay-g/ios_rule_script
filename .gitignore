@@ -5,3 +5,6 @@ debug/
 script/magicjs/server/
 .DS_Store
 .idea
+
+# Local Happ build artifacts
+/build/happ/

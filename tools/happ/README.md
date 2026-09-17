@@ -1,0 +1,127 @@
+# Happ 本地 Geo 构建
+
+从本仓库的 `rule/Surge/<分类>/<分类>.list` 主文件生成 `geosite.dat`、`geoip.dat`，并从实际二进制回读验证。Geo 只保存匹配集合，代理/拦截动作由 Happ 配置决定。**本地构建与回读已通过，Happ 实机待验证。**
+
+只用本仓库规则，不读取 `_All` / `_Resolve`，不采集第三方规则，不处理 ASN、组合条件、复写、MITM 或脚本。无下载服务、上传、发布或自动更新。首批实际验证分类为 OpenAI、Telegram、AdvertisingLite；不宣称其他分类全部可用。
+
+## 准备工具（显式执行，仓库外）
+
+需要 Python 3.9+、Git、Go 1.26+；本次环境为 Python 3.14.7、Go 1.27.1 linux/amd64。Python 仅用标准库；正常构建不安装任何东西。入口调用 `go version -m` 检查两个编译器的完整 commit、未修改状态，以及回读器的依赖版本，因此构建时也须保留 Go。
+
+固定来源：
+
+- `https://github.com/v2fly/domain-list-community`：`6f3acc3ba95299031cf408232e2e65e2c892fd2d`。
+- `https://github.com/Loyalsoldier/geoip`：`1503074d8aee4c623791210e90c04d586c86c8f7`。
+- 本仓库 `geo-reader.go`：只调用 `routercommon.GeoSiteList` / `GeoIPList` 和 `proto.Unmarshal` / `protojson.Marshal`，不实现 Protobuf 编解码。复用固定域名工具的 `go.mod` / `go.sum`：v2ray-core `v5.42.0`、protobuf `v1.36.11`。
+
+选择上述域名工具版本是为了完整保留精确域名、后缀和关键词的类型/值集合。上游新版会剪去被后缀覆盖的冗余条目；这不一定改变匹配语义，但不符合本次逐类型审计要求。不改写第三方源码。
+
+在仓库根目录执行（联网下载源码及 Go 依赖；源码里的第三方规则**不作为输入**）：
+
+```sh
+REPO="$PWD"
+TOOLS="$(mktemp -d /tmp/happ-tools.XXXXXX)"
+mkdir -p "$TOOLS/bin"
+git clone https://github.com/v2fly/domain-list-community "$TOOLS/domain-list-community"
+git -C "$TOOLS/domain-list-community" checkout --detach 6f3acc3ba95299031cf408232e2e65e2c892fd2d
+git clone https://github.com/Loyalsoldier/geoip "$TOOLS/geoip"
+git -C "$TOOLS/geoip" checkout --detach 1503074d8aee4c623791210e90c04d586c86c8f7
+(cd "$TOOLS/domain-list-community" && go build -o "$TOOLS/bin/domain-list-community" .)
+(cd "$TOOLS/geoip" && go build -o "$TOOLS/bin/geoip" .)
+(cd "$TOOLS/domain-list-community" && go build -o "$TOOLS/bin/geo-reader" "$REPO/tools/happ/geo-reader.go")
+git -C "$TOOLS/domain-list-community" rev-parse HEAD
+git -C "$TOOLS/geoip" rev-parse HEAD
+go version -m "$TOOLS/bin/domain-list-community"
+go version -m "$TOOLS/bin/geoip"
+go version -m "$TOOLS/bin/geo-reader"
+```
+
+不要用 `-buildvcs=false` 或修改工具工作树，否则入口的固定版本检查会失败。工具升级须更新版本约束并重新验证，不自动回退到默认数据库。
+
+## 本地构建和回读
+
+继续在同一 shell、仓库根目录运行；跨 shell 请先设置 `TOOLS` 为已准备目录的绝对路径：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/happ -p 'test_*.py'
+python3 tools/happ/build.py --help
+mkdir -p build/happ
+OUT="$(mktemp -d "$PWD/build/happ/build.XXXXXX")"
+python3 tools/happ/build.py \
+  --categories OpenAI Telegram AdvertisingLite \
+  --geosite-tool "$TOOLS/bin/domain-list-community" \
+  --geoip-tool "$TOOLS/bin/geoip" \
+  --geo-reader "$TOOLS/bin/geo-reader" \
+  --output "$OUT"
+ls -lh "$OUT/geosite.dat" "$OUT/geoip.dat" "$OUT/conversion-report.json"
+# 可独立再次回读，不是编译前文本导出：
+"$TOOLS/bin/geo-reader" "$OUT/geosite.dat" "$OUT/geoip.dat" > "$OUT/readback-again.json"
+```
+
+成功只在两个工具完成且回读全部一致后打印 `Validated ...`。类别引用用无前缀小写名：`openai`、`telegram`、`advertisinglite`。两个上游工具在数据库内部把分类写为大写；回读按小写核对，配置按 Geo 约定引用小写（Happ 行为仍须实机确认）。
+
+`--categories` 可以显式选择其他现有分类的原名；拒绝路径穿越、缺失文件、重名及小写冲突。单类可只包含域名或 IP，但**所选集合整体必须同时有支持的域名和 CIDR**，否则在调用工具前失败。原因是 IP 工具在整体空输入时不写文件，而本命令交付两库；这是入口约束，不是 Happ 单库能力的结论。完全没有支持规则的单类也会失败。
+
+项目内的 `build/happ/` 已加入 `.gitignore`，用于保存本地数据库、中间文件和日志，不提交到 Git。每次构建创建独立子目录。
+
+输出目录必须不存在或为空，永不覆盖上次产物；重试用新目录。失败返回非零，保留中间数据、日志及失败报告（若已进入编译阶段）；不得使用失败目录中的数据库。输入规则只读。
+
+## 转换与报告
+
+- `DOMAIN` → `full:`，`DOMAIN-SUFFIX` → `domain:`，`DOMAIN-KEYWORD` → `keyword:`。保持匹配类型，域名统一小写。同类型同值只写一次，不合并精确/后缀；数字域名仍是域名。
+- 完整域名支持 ASCII DNS 标签或已编码的 punycode；不自动转写 Unicode。关键词允许 `A-Z a-z 0-9 . -` 的非空片段，无须满足完整 DNS 名格式。拒绝空白、`#`、`@`、`&`、冒号等编译器语法注入。其他合法但未支持的格式明确报错，不猜测性改写。
+- `IP-CIDR` / `IP-CIDR6` 严格检查地址族和主机位，标准化为 CIDR。不能把 `192.0.2.1/24` 扩大为 `/24`。不支持带 scope ID 的地址。编译器可能聚合网络；分别折叠 IPv4/IPv6 覆盖集合后比较。
+- 仅 IP 的 `no-resolve` 修饰符可移除，每条转换行记录语义警告。Geo 不能逐条携带 DNS 行为；配置选 `AsIs` 不代表完整保留 Surge 行为。其他参数、未知类型、字段错误明确失败。
+- `IP-ASN`、`AND`、`OR`、`USER-AGENT`、`PROCESS-NAME`、`URL-REGEX` 整行跳过，记录路径、行号、原文、原因。OR 内五个 ASN 只算一条跳过；不抽取 AND 内的域名。
+
+输出包含 `geosite-input/`、`geoip-input/`、只引用本地文本的 `geoip-config.json`、两个 `.dat`、`readback.json`、三份工具日志及 `conversion-report.json`。报告中：
+
+- `status: validated` 才是成功；`validation` 显示分类集、域名类型/值和 CIDR 覆盖一致。
+- `categories` 记录每个源文件路径、SHA-256、`by_rule_type` 读取/转换/跳过的**输入行数**、`skipped` 和 `warnings` 的逐行明细。
+- `before_compile` 是去重后的输入条目数；`duplicates_removed` 是去重数；`after_compile` 是二进制回读条目数及 IPv4/IPv6 数量。头部 TOTAL 不参与统计。
+- `tools` 记录可执行路径、SHA-256、编译器来源/完整 commit、实际 Go build metadata；`commands` 记录实参、退出码、日志路径；`artifacts` 记录两个数据库大小及 SHA-256。
+
+当前主文件 AdvertisingLite 的头部统计与实际行数不同；入口只统计实际内容。本次三分类实际转换 443 行、跳过 15 行；详情与可复验路径见 `docs/plans/happ-local-geo-build.md`。
+
+## 可选 Happ 测试配置
+
+只有同时传入两 URL 才生成 `routing.json` 和 `routing.txt`；URL 不会被下载或探测。仅接受无用户名/密码的 HTTP(S) 地址。未传 URL 不生成配置，不放占位下载地址。首批三类必须齐全；其他附加类别不会被猜测性分配动作。
+
+下面的 `example.com` **仅用于本地编码验证，无法用来下载本次数据库**。真正导入前换为你已自行准备、设备可访问的两个文件 URL；本工具不上传、不启动 HTTP 服务。
+
+```sh
+mkdir -p build/happ
+PROFILE_OUT="$(mktemp -d "$PWD/build/happ/profile.XXXXXX")"
+python3 tools/happ/build.py \
+  --categories OpenAI Telegram AdvertisingLite \
+  --geosite-tool "$TOOLS/bin/domain-list-community" \
+  --geoip-tool "$TOOLS/bin/geoip" \
+  --geo-reader "$TOOLS/bin/geo-reader" \
+  --output "$PROFILE_OUT" \
+  --geosite-url https://example.com/geosite.dat \
+  --geoip-url https://example.com/geoip.dat
+python3 - "$PROFILE_OUT" <<'PY'
+import base64, json, pathlib, sys
+out = pathlib.Path(sys.argv[1])
+link = (out / 'routing.txt').read_text().strip()
+assert link.startswith('happ://routing/add/')
+data = base64.b64decode(link.removeprefix('happ://routing/add/'), validate=True)
+assert data == (out / 'routing.json').read_bytes()
+assert json.loads(data)['Geositeurl'] == 'https://example.com/geosite.dat'
+print('routing JSON / Base64 roundtrip OK')
+PY
+```
+
+固定配置名 `ios_rule_script-local-test`：openai、telegram → Proxy，advertisinglite → Block。各 Sites/Ip 引用只对对应库实际存在的类别生成；Direct 为空，不引用默认 `cn` / `private` 等标签，不人为给同一类别设置冲突动作。
+
+按 [Happ 官方路由文档](https://www.happ.su/main/dev-docs/routing.md?displayAgentInstructions=false&markdownSource=page-action) 使用 `Geositeurl`、`Geoipurl`、`happ://routing/add/{base64}`（不是 `onadd`），UTF-8 JSON 和标准 Base64，并在生成时反向解码。显式设置字符串 `GlobalProxy: "true"`、`FakeDNS: "false"`、`DomainStrategy: "AsIs"`、空 `LastUpdated`。DNS 为官方默认示例的 Cloudflare 远程 DoH (`1.1.1.1`) 与 Google 国内字段 DoH (`8.8.8.8`)，含对应 DnsHosts。**这只是测试参数，不是适合中国网络环境的推荐模板。**不承诺更新频率或冲突优先级。
+
+## 实机验收（未完成）
+
+1. 记录设备平台、Happ 版本及订阅类型。选允许手动导入路由的订阅；JSON 订阅不能手动添加，须由提供方随订阅提供。
+2. 自行准备能访问真实数据库的 URL，重新生成配置、复制 `routing.txt` 导入。同名会更新；首个配置在两个 Geo 下载完成后才激活。不要把本地 Base64 验证当作下载成功。
+3. 确认两个下载成功、分类存在、无错误提示；重连后再验证路由。设置修改只在重连后生效。
+4. 分别验证精确域名、后缀、关键词、直接 IPv4/IPv6 访问的代理或拦截结果；确认 DNS 行为。必要时用保留域名 `example.com` / `example.org` 和文档网段 `192.0.2.0/24` / `2001:db8::/32` 配合可控环境隔离匹配语义，勿把保留网段不可达误判为路由结果。
+5. 分类之间可能天然重叠；测试模板不重复引用同一分类，但不能据此推断 Happ 的冲突优先级。记录实际表现再决定是否使用。
+
+本次没有可用设备或真实下载地址，未进行导入、下载、重连或流量匹配测试。结论仅为本地编译及回读通过。
