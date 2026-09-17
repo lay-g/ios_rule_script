@@ -2,7 +2,38 @@
 
 递归扫描本仓库 `rule/Surge/` 全部规则分类，优先读取每个目录中的 `<目录名>_All.list`，没有时才读 `<目录名>.list`，生成 `geosite.dat`、`geoip.dat` 并从实际二进制逐分类回读验证。Geo 只保存匹配集合，代理/拦截动作由 Happ 配置决定。**全量本地构建与回读已通过，Happ 实机待验证。**
 
-“全量”指全分类发现与覆盖审计，**不表示每条 Surge 规则均无损转换**：ASN、组合条件、UA、进程、URL 条件不支持；固定 GeoIP 编译器不能保留 IPv4-mapped IPv6，本次 116 行明确跳过，不转换为 IPv4。每条跳过及 `no-resolve` 损失均在报告中。只用本仓库规则；不另读 `_Resolve` 等变体、不采集第三方数据、不处理复写、MITM 或脚本，无下载服务、上传、发布或自动更新。
+“全量”指全分类发现与覆盖审计，**不表示每条 Surge 规则均无损转换**：ASN、组合条件、UA、进程、URL 条件不支持；固定 GeoIP 编译器不能保留 IPv4-mapped IPv6，本次 116 行明确跳过，不转换为 IPv4。每条跳过及 `no-resolve` 损失均在报告中。构建器只用本仓库规则；不另读 `_Resolve` 等变体、不采集第三方数据、不处理复写、MITM 或脚本，构建器本身不联网发布。独立的每日同步/Release 自动化见下节。
+
+## 每日同步与 Happ Release
+
+`.github/workflows/happ-daily.yml` 每天 UTC **21:23**（北京时间次日 **05:23**）运行，也可在 Actions 的 **Daily rule sync and Happ snapshot** 页面手动 `Run workflow`。仅 `lay-g/ios_rule_script` **默认分支**允许执行；非默认分支手动运行或复制到上游/其他 fork 都跳过。没有 push 触发，避免自动提交循环。
+
+维护者需先将本次文件自行提交至默认分支、在 fork 启用 Actions，并允许 `GITHUB_TOKEN` 的 `contents: write`。分支保护若阻止机器人普通 push，任务会失败；不使用 PAT、force push 或绕过保护。本次只创建自动化，**尚未在 GitHub 执行或发布**。schedule 可能延迟；GitHub 对不活跃仓库的定时任务也可能停用。并发组 `cancel-in-progress: false` 不取消正在运行的任务，但 GitHub 只保留一个 pending，不保证密集手动触发每次都执行。
+
+每次运行固定上游 `blackmatrix7/ios_rule_script master` 的一个 commit，仅在 Actions 临时 checkout 精确替换**整个 `rule/`**：所有客户端的新增、修改和删除都同步；新增客户端也自动纳入。`rewrite/`、`script/`、`source/` 等其他根目录不属于本次同步，自有 `tools/`、`.github/`、`docs/` 不会被上游覆盖。不 merge/reset 整个上游、不执行上游脚本/工作流。Happ 仍只从已同步的全量 `rule/Surge` 构建，不重复合并其他客户端表示。
+
+先运行测试，再用现有 pins 编译两库并逐分类二进制回读。只有全部通过且源码/dat 哈希仍一致才提交规则变更；无变更不造空提交。普通 push 遇到外部推进会直接失败，不 rebase 旧产物、不发布。target 始终是同步后的实际 commit；无变更则是 checkout commit。完整诊断（含逐行报告和 readback）保存在 Actions artifact，保留 14 天；即使构建失败也尝试保留已产生的日志。
+
+Release 标签为 `happ-<UTC YYYYMMDDTHHMMSSZ>-<run_id>-<run_attempt>`。这是**规则数据快照，不是应用语义版本**，同日可有多个 Release；即使没有规则变更，每次成功运行仍创建新快照，数据相同也允许重复，rerun 的 attempt 不同。不会删除旧 Release 或自动清理历史。
+
+发布流程先建 draft，上传全部五个附件后才公开并设置 latest：
+
+- `geosite.dat`、`geoip.dat`：Happ 全量数据库。
+- `SHA256SUMS`：两个 dat 和以下两个精简元数据文件的 SHA-256。
+- `build-manifest.json`、`release-notes.md`：源/checkout/目标 commit、工具 pins/实际元数据、数据变更、转换/跳过数量和限制。mapped IPv6 的历史基线为 116 行，每次发布按报告重新统计，不写死当前数。
+
+任何编译/回读/push 失败不进入发布；上传失败保留未公开 draft，不改变旧 latest，不把半成品公开。**若规则提交已经 push 成功、随后发布失败，请新发起 Run workflow（workflow_dispatch）或等待下次定时运行，不要对旧 run 使用 Re-run**：Re-run 保留旧 `github.sha`，远端推进检查会安全拒绝它。尚未推进远端且默认分支未变化时才可 Re-run；能够进入发布的重试使用不同 attempt 标签。旧 draft 由维护者按需手工处理。完整逐行诊断不作为 Release 默认附件。
+
+首次成功发布后，Happ 可使用以下稳定地址（当前没有替用户创建 Release，不能据此声称地址已可用）：
+
+```text
+https://github.com/lay-g/ios_rule_script/releases/latest/download/geosite.dat
+https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip.dat
+```
+
+Actions 使用官方 go.mod/下载列表核实存在的 **Go 1.27.1**（固定 geoip 要求 1.26+），`GOTOOLCHAIN=local`，复用下述编译器 pins 和本 fork 的 reader，不改转换规则。Actions 固定完整 commit SHA，gh 2.100.0 下载固定 SHA-256 校验；没有第三方发布 action 或额外 Python 包。
+
+辅助 `tools/happ/daily.py snapshot` 会修改并暂存 `rule/`，**仅供干净、可丢弃的 Actions 工作区使用，不要在个人工作树手动运行**。`verify` 校验完整构建报告、文件哈希和路径范围；`manifest` 只生成精简发布元数据，不联网。实际流程/失败保护由 `test_daily.py` 的临时 Git 仓库及本地 bare remote 测试覆盖。命令、源码 SHA、真实全量回读结果和远端未验证边界见 [执行计划](../../docs/plans/happ-daily-sync-release.md)。
 
 ## 准备工具（显式执行，仓库外）
 
