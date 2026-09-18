@@ -1,5 +1,6 @@
 """Disposable Git fixtures and the actual workflow shell; never use the real origin."""
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,7 @@ class DailyTests(unittest.TestCase):
         self.git("config", "user.name", "Fixture")
         self.git("config", "user.email", "fixture@example.invalid")
         for path, text in {"rule/Surge/Sample/Sample.list": "DOMAIN,example.com\nIP-CIDR,192.0.2.1\n",
+                           "rule/Surge/ChinaMax/ChinaMax_All.list": "DOMAIN,cn.example\nIP-CIDR,192.0.2.0/24\n",
                            "rule/Clash/old.yaml": "old\n", "rule/QuantumultX/keep.list": "old\n",
                            "tools/own.txt": "own", ".github/own.txt": "own", "docs/own.txt": "own",
                            "rewrite/own.txt": "own", "script/own.txt": "own"}.items():
@@ -97,6 +99,16 @@ class DailyTests(unittest.TestCase):
             "categories": {"sample": {"input": str(path), "sha256": build.sha256(path), "warnings": [],
                                       "skipped": [{"reason": "IPv4-mapped IPv6 cannot be preserved by pinned GeoIP compiler; not converted to IPv4"}]}}}
         build.write_json(self.output / "conversion-report.json", report)
+        lite_output = self.output / "chinamax"
+        lite_output.mkdir(exist_ok=True)
+        lite = copy.deepcopy(report)
+        lite["selection"] = "explicit"
+        path = self.repo / "rule/Surge/ChinaMax/ChinaMax_All.list"
+        lite["categories"] = {"chinamax": {**report["categories"]["sample"],
+                                            "input": str(path), "sha256": build.sha256(path)}}
+        for name in ("geosite.dat", "geoip.dat"):
+            (lite_output / name).write_bytes(b"fixture dat")
+        build.write_json(lite_output / "conversion-report.json", lite)
         return report
 
     def test_snapshot_all_clients_and_commit_target_preserve_own_files(self):
@@ -153,6 +165,31 @@ class DailyTests(unittest.TestCase):
                 self.assertNotEqual(self.shell(COMMIT).returncode, 0)
                 self.assertEqual(daily.git("rev-parse", "HEAD"), self.base)
                 self.assertEqual(self.git("--git-dir=" + str(self.remote), "rev-parse", "main"), self.base)
+
+    def test_chinamax_failure_prevents_commit(self):
+        daily.snapshot(self.source)
+        for mutation in ("missing", "artifact", "selection", "category", "source", "readback"):
+            with self.subTest(mutation=mutation):
+                self.report()
+                folder = self.output / "chinamax"
+                path = folder / "conversion-report.json"
+                report = json.loads(path.read_text())
+                if mutation == "missing":
+                    path.unlink()
+                elif mutation == "artifact":
+                    (folder / "geosite.dat").write_bytes(b"corrupt")
+                else:
+                    if mutation == "selection":
+                        report["selection"] = "all"
+                    elif mutation == "category":
+                        report["categories"]["other"] = report["categories"]["chinamax"]
+                    elif mutation == "source":
+                        report["categories"]["chinamax"]["input"] = str(self.repo / "rule/Surge/Sample/Sample.list")
+                    else:
+                        report["validation"]["cidr_coverage"] = "different"
+                    build.write_json(path, report)
+                self.assertNotEqual(self.shell(COMMIT).returncode, 0)
+                self.assertEqual(daily.git("rev-parse", "HEAD"), self.base)
 
     def test_dirty_checkout_and_symlink_source_rejected(self):
         self.put("docs/untracked", "preserve")
@@ -245,7 +282,13 @@ class DailyTests(unittest.TestCase):
         self.assertEqual(len(set(tags)), 2)
         self.assertTrue(lines[-1].endswith("--draft=false --latest"))
         upload = next(line for line in lines if line.startswith("release upload"))
-        self.assertEqual(len(upload.split()), 8)  # command, subcommand, tag, five assets
+        self.assertEqual(len(upload.split()), 10)  # command, subcommand, tag, seven assets
+        data = json.loads((self.output / "build-manifest.json").read_text())
+        for name in ("geosite-chinamax.dat", "geoip-chinamax.dat"):
+            self.assertIn(str(self.output / name), upload)
+            self.assertEqual(data["artifacts"][name]["sha256"], build.sha256(self.output / name))
+            self.assertIn(name, (self.output / "SHA256SUMS").read_text())
+        self.assertEqual(data["chinamax"]["validation"]["category_sets"], "equal")
         self.assertNotIn("readback", upload)
 
 
