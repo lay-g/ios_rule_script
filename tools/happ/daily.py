@@ -52,16 +52,16 @@ def verify_tree(source):
         raise ValueError("staged changes outside rule/")
 
 
-def validated_report(output, *, chinamax=False):
+def validated_report(output, *, chinaonly=False):
     report = json.loads((output / "conversion-report.json").read_text())
-    if (report["status"] != "validated" or report["selection"] != ("explicit" if chinamax else "all") or report["validation"] != {
+    if (report["status"] != "validated" or report["selection"] != ("explicit" if chinaonly else "all") or report["validation"] != {
             "category_sets": "equal", "domain_types_and_values": "equal", "cidr_coverage": "equal"}):
         raise ValueError("release requires the expected build selection and all readback checks")
-    if chinamax:
-        expected = dict(category_paths(["ChinaMax"], root=Path.cwd()))
+    if chinaonly:
+        expected = dict(category_paths(["ChinaMax", "ChinaMaxNoIP", "ChinaMaxNoMedia"], root=Path.cwd()))
         actual = {name: Path(info["input"]).resolve() for name, info in report["categories"].items()}
         if actual != expected:
-            raise ValueError("ChinaMax release requires exactly the ChinaMax source category")
+            raise ValueError("ChinaOnly release requires exactly ChinaMax, ChinaMaxNoIP and ChinaMaxNoMedia")
     for name in ("geosite.dat", "geoip.dat"):
         path = output / name
         if report["artifacts"][name] != {"bytes": path.stat().st_size, "sha256": sha256(path)} or not path.stat().st_size:
@@ -79,7 +79,7 @@ def validated_report(output, *, chinamax=False):
 def manifest(source, base, target, output, run_id, attempt):
     verify_tree(source)
     report = validated_report(output)
-    lite = validated_report(output / "chinamax", chinamax=True)
+    lite = validated_report(output / "chinaonly", chinaonly=True)
     for value in (base, target):
         commit_sha(value)
     if git("rev-parse", "HEAD") != target or git("rev-parse", target + ":rule") != git("rev-parse", source + ":rule"):
@@ -107,12 +107,12 @@ def manifest(source, base, target, output, run_id, attempt):
     for name, info in lite["artifacts"].items():
         if name not in ("geosite.dat", "geoip.dat"):
             continue
-        published = name.replace(".dat", "-chinamax.dat")
-        shutil.copyfile(output / "chinamax" / name, output / published)
+        published = name.replace(".dat", "-chinaonly.dat")
+        shutil.copyfile(output / "chinaonly" / name, output / published)
         lite_artifacts[published] = info
     data["artifacts"].update(lite_artifacts)
-    data["chinamax"] = {
-        "happ_input": "rule/Surge/ChinaMax (prefer _All)",
+    data["chinaonly"] = {
+        "happ_input": "rule/Surge: ChinaMax, ChinaMaxNoIP, ChinaMaxNoMedia (prefer _All)",
         "summary": lite["summary"], "validation": lite["validation"], "artifacts": lite_artifacts,
         "skipped_by_reason": dict(Counter(item["reason"] for category in lite["categories"].values()
                                           for item in category["skipped"])),
@@ -121,7 +121,7 @@ def manifest(source, base, target, output, run_id, attempt):
     # Local paths are diagnostics, not part of the public tool identity.
     data["tools"] = {kind: {k: v for k, v in info.items() if k != "path"} for kind, info in data["tools"].items()}
     write_json(output / "build-manifest.json", data)
-    notes = ["# Happ full and ChinaMax rule snapshot", "", f"- Source: blackmatrix7/ios_rule_script@{source} (master)",
+    notes = ["# Happ full and ChinaOnly rule snapshot", "", f"- Source: blackmatrix7/ios_rule_script@{source} (master)",
              f"- Checkout: {base}", f"- Target: lay-g/ios_rule_script@{target}", f"- Run: {run_id}, attempt: {attempt}",
              f"- All-client rule/ file changes: {dict(changes) or 'none (no empty commit)'}",
              f"- Converted: {report['summary']['converted_lines']}; skipped: {report['summary']['skipped_lines']} input lines.",
@@ -132,13 +132,13 @@ def manifest(source, base, target, output, run_id, attempt):
              "## Stable Happ downloads", "",
              "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geosite.dat",
              "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip.dat", "",
-             "## ChinaMax only", "",
+             "## ChinaOnly", "",
              f"- Converted: {lite['summary']['converted_lines']}; skipped: {lite['summary']['skipped_lines']} input lines.",
-             "- Only geosite:chinamax / geoip:chinamax; no other categories or routing actions.",
-             "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geosite-chinamax.dat",
-             "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip-chinamax.dat", ""]
+             "- Geosite: chinamax, chinamaxnoip, chinamaxnomedia; GeoIP: chinamax, chinamaxnomedia. No routing actions.",
+             "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geosite-chinaonly.dat",
+             "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip-chinaonly.dat", ""]
     (output / "release-notes.md").write_text("\n".join(notes))
-    names = ("geosite.dat", "geoip.dat", "geosite-chinamax.dat", "geoip-chinamax.dat",
+    names = ("geosite.dat", "geoip.dat", "geosite-chinaonly.dat", "geoip-chinaonly.dat",
              "build-manifest.json", "release-notes.md")
     (output / "SHA256SUMS").write_text("".join(f"{sha256(output / name)}  {name}\n" for name in names))
 
@@ -160,7 +160,7 @@ def main():
     elif args.command == "verify":
         verify_tree(args.source)
         validated_report(args.output)
-        validated_report(args.output / "chinamax", chinamax=True)
+        validated_report(args.output / "chinaonly", chinaonly=True)
     else:
         manifest(args.source, args.base, args.target, args.output, args.run_id, args.attempt)
 

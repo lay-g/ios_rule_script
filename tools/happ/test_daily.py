@@ -47,6 +47,9 @@ class DailyTests(unittest.TestCase):
                            "tools/own.txt": "own", ".github/own.txt": "own", "docs/own.txt": "own",
                            "rewrite/own.txt": "own", "script/own.txt": "own"}.items():
             self.put(path, text)
+        for name in ("ChinaMaxNoIP", "ChinaMaxNoMedia"):
+            self.put(f"rule/Surge/{name}/{name}_All.list", "DOMAIN,cn.example\n" +
+                     ("IP-CIDR,192.0.2.0/24\n" if name == "ChinaMaxNoMedia" else ""))
         for name in ("build.py", "daily.py"):
             self.put("tools/happ/" + name, (ROOT / "tools/happ" / name).read_text())
         self.git("add", ".")
@@ -99,13 +102,15 @@ class DailyTests(unittest.TestCase):
             "categories": {"sample": {"input": str(path), "sha256": build.sha256(path), "warnings": [],
                                       "skipped": [{"reason": "IPv4-mapped IPv6 cannot be preserved by pinned GeoIP compiler; not converted to IPv4"}]}}}
         build.write_json(self.output / "conversion-report.json", report)
-        lite_output = self.output / "chinamax"
+        lite_output = self.output / "chinaonly"
         lite_output.mkdir(exist_ok=True)
         lite = copy.deepcopy(report)
         lite["selection"] = "explicit"
-        path = self.repo / "rule/Surge/ChinaMax/ChinaMax_All.list"
-        lite["categories"] = {"chinamax": {**report["categories"]["sample"],
-                                            "input": str(path), "sha256": build.sha256(path)}}
+        lite["categories"] = {}
+        for name in ("ChinaMax", "ChinaMaxNoIP", "ChinaMaxNoMedia"):
+            path = self.repo / f"rule/Surge/{name}/{name}_All.list"
+            lite["categories"][name.lower()] = {**report["categories"]["sample"],
+                                                "input": str(path), "sha256": build.sha256(path)}
         for name in ("geosite.dat", "geoip.dat"):
             (lite_output / name).write_bytes(b"fixture dat")
         build.write_json(lite_output / "conversion-report.json", lite)
@@ -166,12 +171,17 @@ class DailyTests(unittest.TestCase):
                 self.assertEqual(daily.git("rev-parse", "HEAD"), self.base)
                 self.assertEqual(self.git("--git-dir=" + str(self.remote), "rev-parse", "main"), self.base)
 
-    def test_chinamax_failure_prevents_commit(self):
+    def test_chinaonly_workflow_selects_exact_categories(self):
+        command = step_shell("ChinaOnly build with binary readback")
+        self.assertIn("--categories ChinaMax ChinaMaxNoIP ChinaMaxNoMedia \\", command)
+        self.assertIn('--output "$OUT/chinaonly"', command)
+
+    def test_chinaonly_failure_prevents_commit(self):
         daily.snapshot(self.source)
-        for mutation in ("missing", "artifact", "selection", "category", "source", "readback"):
+        for mutation in ("missing", "artifact", "selection", "category", "missing_category", "source", "readback"):
             with self.subTest(mutation=mutation):
                 self.report()
-                folder = self.output / "chinamax"
+                folder = self.output / "chinaonly"
                 path = folder / "conversion-report.json"
                 report = json.loads(path.read_text())
                 if mutation == "missing":
@@ -183,6 +193,8 @@ class DailyTests(unittest.TestCase):
                         report["selection"] = "all"
                     elif mutation == "category":
                         report["categories"]["other"] = report["categories"]["chinamax"]
+                    elif mutation == "missing_category":
+                        del report["categories"]["chinamaxnoip"]
                     elif mutation == "source":
                         report["categories"]["chinamax"]["input"] = str(self.repo / "rule/Surge/Sample/Sample.list")
                     else:
@@ -284,11 +296,11 @@ class DailyTests(unittest.TestCase):
         upload = next(line for line in lines if line.startswith("release upload"))
         self.assertEqual(len(upload.split()), 10)  # command, subcommand, tag, seven assets
         data = json.loads((self.output / "build-manifest.json").read_text())
-        for name in ("geosite-chinamax.dat", "geoip-chinamax.dat"):
+        for name in ("geosite-chinaonly.dat", "geoip-chinaonly.dat"):
             self.assertIn(str(self.output / name), upload)
             self.assertEqual(data["artifacts"][name]["sha256"], build.sha256(self.output / name))
             self.assertIn(name, (self.output / "SHA256SUMS").read_text())
-        self.assertEqual(data["chinamax"]["validation"]["category_sets"], "equal")
+        self.assertEqual(data["chinaonly"]["validation"]["category_sets"], "equal")
         self.assertNotIn("readback", upload)
 
 

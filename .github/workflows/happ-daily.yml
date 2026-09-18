@@ -92,13 +92,13 @@ jobs:
             --geo-reader "$TOOLS/bin/geo-reader" \
             --output "$OUT" 2>&1 | tee "$RUNNER_TEMP/happ-build.log"
 
-      - name: ChinaMax-only build with binary readback
+      - name: ChinaOnly build with binary readback
         run: |
-          python3 tools/happ/build.py --categories ChinaMax \
+          python3 tools/happ/build.py --categories ChinaMax ChinaMaxNoIP ChinaMaxNoMedia \
             --geosite-tool "$TOOLS/bin/geosite" \
             --geoip-tool "$TOOLS/bin/geoip" \
             --geo-reader "$TOOLS/bin/geo-reader" \
-            --output "$OUT/chinamax" 2>&1 | tee "$RUNNER_TEMP/happ-chinamax-build.log"
+            --output "$OUT/chinaonly" 2>&1 | tee "$RUNNER_TEMP/happ-chinaonly-build.log"
 
       - name: Verify, commit only changed rules, and prepare compact release metadata
         id: target
@@ -125,7 +125,7 @@ jobs:
             ${{ runner.temp }}/happ-output/
             ${{ runner.temp }}/happ-tests.log
             ${{ runner.temp }}/happ-build.log
-            ${{ runner.temp }}/happ-chinamax-build.log
+            ${{ runner.temp }}/happ-chinaonly-build.log
             ${{ runner.temp }}/happ-provenance.txt
             ${{ runner.temp }}/happ-pins.tsv
           retention-days: 14
@@ -153,6 +153,6 @@ jobs:
           gh release create "$tag" --target "$TARGET_SHA" --draft \
             --title "Happ data snapshot $tag" --notes-file "$OUT/release-notes.md"
           gh release upload "$tag" "$OUT/geosite.dat" "$OUT/geoip.dat" "$OUT/SHA256SUMS" \
-            "$OUT/geosite-chinamax.dat" "$OUT/geoip-chinamax.dat" \
+            "$OUT/geosite-chinaonly.dat" "$OUT/geoip-chinaonly.dat" \
             "$OUT/build-manifest.json" "$OUT/release-notes.md"
           gh release edit "$tag" --draft=false --latest
