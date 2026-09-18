@@ -58,10 +58,15 @@ def validated_report(output, *, chinaonly=False):
             "category_sets": "equal", "domain_types_and_values": "equal", "cidr_coverage": "equal"}):
         raise ValueError("release requires the expected build selection and all readback checks")
     if chinaonly:
-        expected = dict(category_paths(["ChinaMax", "ChinaMaxNoIP", "ChinaMaxNoMedia"], root=Path.cwd()))
+        expected = dict(category_paths(["ChinaMaxNoIP", "ChinaIPs", "Lan"], root=Path.cwd()))
         actual = {name: Path(info["input"]).resolve() for name, info in report["categories"].items()}
         if actual != expected:
-            raise ValueError("ChinaOnly release requires exactly ChinaMax, ChinaMaxNoIP and ChinaMaxNoMedia")
+            raise ValueError("ChinaOnly release requires exactly ChinaMaxNoIP, ChinaIPs and Lan")
+        for database, labels in (("geosite", {"chinamaxnoip", "lan"}), ("geoip", {"chinaips", "lan"})):
+            actual_labels = {name for name, info in report["categories"].items()
+                             if info["after_compile"][database] > 0}
+            if actual_labels != labels:
+                raise ValueError(f"ChinaOnly {database} categories differ from expected labels")
     for name in ("geosite.dat", "geoip.dat"):
         path = output / name
         if report["artifacts"][name] != {"bytes": path.stat().st_size, "sha256": sha256(path)} or not path.stat().st_size:
@@ -112,7 +117,7 @@ def manifest(source, base, target, output, run_id, attempt):
         lite_artifacts[published] = info
     data["artifacts"].update(lite_artifacts)
     data["chinaonly"] = {
-        "happ_input": "rule/Surge: ChinaMax, ChinaMaxNoIP, ChinaMaxNoMedia (prefer _All)",
+        "happ_input": "rule/Surge: ChinaMaxNoIP, ChinaIPs, Lan (prefer _All)",
         "summary": lite["summary"], "validation": lite["validation"], "artifacts": lite_artifacts,
         "skipped_by_reason": dict(Counter(item["reason"] for category in lite["categories"].values()
                                           for item in category["skipped"])),
@@ -134,7 +139,7 @@ def manifest(source, base, target, output, run_id, attempt):
              "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip.dat", "",
              "## ChinaOnly", "",
              f"- Converted: {lite['summary']['converted_lines']}; skipped: {lite['summary']['skipped_lines']} input lines.",
-             "- Geosite: chinamax, chinamaxnoip, chinamaxnomedia; GeoIP: chinamax, chinamaxnomedia. No routing actions.",
+             "- Geosite: chinamaxnoip, lan; GeoIP: chinaips, lan. No routing actions.",
              "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geosite-chinaonly.dat",
              "- https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip-chinaonly.dat", ""]
     (output / "release-notes.md").write_text("\n".join(notes))

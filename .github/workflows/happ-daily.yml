@@ -94,7 +94,7 @@ jobs:
 
       - name: ChinaOnly build with binary readback
         run: |
-          python3 tools/happ/build.py --categories ChinaMax ChinaMaxNoIP ChinaMaxNoMedia \
+          python3 tools/happ/build.py --categories ChinaMaxNoIP ChinaIPs Lan \
             --geosite-tool "$TOOLS/bin/geosite" \
             --geoip-tool "$TOOLS/bin/geoip" \
             --geo-reader "$TOOLS/bin/geo-reader" \

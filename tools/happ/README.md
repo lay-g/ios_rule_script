@@ -19,7 +19,7 @@ Release 标签为 `happ-<UTC YYYYMMDDTHHMMSSZ>-<run_id>-<run_attempt>`。这是*
 发布流程先建 draft，上传全部七个附件后才公开并设置 latest：
 
 - `geosite.dat`、`geoip.dat`：Happ 全量数据库。
-- `geosite-chinaonly.dat`、`geoip-chinaonly.dat`：包含 ChinaMax、ChinaMaxNoIP、ChinaMaxNoMedia 的精简数据库。
+- `geosite-chinaonly.dat`、`geoip-chinaonly.dat`：包含 ChinaMaxNoIP、ChinaIPs、Lan 的精简数据库。
 - `SHA256SUMS`：四个 dat 和以下两个精简元数据文件的 SHA-256。
 - `build-manifest.json`、`release-notes.md`：源/checkout/目标 commit、工具 pins/实际元数据、数据变更、转换/跳过数量和限制。mapped IPv6 的历史基线为 116 行，每次发布按报告重新统计，不写死当前数。
 
@@ -34,7 +34,7 @@ https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip.dat
 
 ### ChinaOnly 精简版
 
-每日流程额外用 `--categories ChinaMax ChinaMaxNoIP ChinaMaxNoMedia` 独立构建、回读，各分类优先读取 `_All.list`，不存在时回退到同名 `.list`。全量版保持不变；任一版本校验失败都不提交或发布。`build-manifest.json` 的 `chinaonly` 字段单独记录精简版统计、跳过原因和校验结果，完整报告在 Actions artifact 的 `chinaonly/` 子目录。
+每日流程额外用 `--categories ChinaMaxNoIP ChinaIPs Lan` 独立构建、回读，各分类优先读取 `_All.list`，不存在时回退到同名 `.list`。全量版保持不变；任一版本校验失败都不提交或发布。`build-manifest.json` 的 `chinaonly` 字段单独记录精简版统计、跳过原因和校验结果，完整报告在 Actions artifact 的 `chinaonly/` 子目录。
 
 首次包含精简版的 Release 成功发布后，使用：
 
@@ -43,14 +43,14 @@ https://github.com/lay-g/ios_rule_script/releases/latest/download/geosite-chinao
 https://github.com/lay-g/ios_rule_script/releases/latest/download/geoip-chinaonly.dat
 ```
 
-域名库包含 `geosite:chinamax`、`geosite:chinamaxnoip`、`geosite:chinamaxnomedia`；IP 库包含 `geoip:chinamax`、`geoip:chinamaxnomedia`。ChinaMaxNoIP 没有 IP 规则，不制造空的 `geoip:chinamaxnoip` 分类。三个分类独立保留，不合并标签，便于选择完整国内、无 IP 或排除国内媒体的规则。
+域名库仅包含 `geosite:chinamaxnoip`、`geosite:lan`；IP 库仅包含 `geoip:chinaips`、`geoip:lan`。ChinaMaxNoIP 提供国内域名，ChinaIPs 提供国内 IP，Lan 提供局域网域名和 IP。不制造空分类，发布校验要求两库各自的标签集合严格符合上述范围。
 
 直连动作由客户端配置指定。没有广告、OpenAI、Telegram、private 等其他分类，不可继续引用它们。转换限制与全量版一致，Happ 实机仍待验证。此版本替代原来的 `*-chinamax.dat` 附件，使用者须更新为上述 `*-chinaonly.dat` 下载地址；旧 Release 中的文件不删除。
 
 本地只构建精简版（沿用下文准备的 `TOOLS`）：
 
 ```sh
-python3 tools/happ/build.py --categories ChinaMax ChinaMaxNoIP ChinaMaxNoMedia \
+python3 tools/happ/build.py --categories ChinaMaxNoIP ChinaIPs Lan \
   --geosite-tool "$TOOLS/bin/domain-list-community" \
   --geoip-tool "$TOOLS/bin/geoip" \
   --geo-reader "$TOOLS/bin/geo-reader" \

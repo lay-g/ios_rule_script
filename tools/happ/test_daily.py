@@ -47,9 +47,10 @@ class DailyTests(unittest.TestCase):
                            "tools/own.txt": "own", ".github/own.txt": "own", "docs/own.txt": "own",
                            "rewrite/own.txt": "own", "script/own.txt": "own"}.items():
             self.put(path, text)
-        for name in ("ChinaMaxNoIP", "ChinaMaxNoMedia"):
-            self.put(f"rule/Surge/{name}/{name}_All.list", "DOMAIN,cn.example\n" +
-                     ("IP-CIDR,192.0.2.0/24\n" if name == "ChinaMaxNoMedia" else ""))
+        for name in ("ChinaMaxNoIP", "ChinaIPs", "Lan"):
+            self.put(f"rule/Surge/{name}/{name}_All.list",
+                     ("DOMAIN,cn.example\n" if name != "ChinaIPs" else "") +
+                     ("IP-CIDR,192.0.2.0/24\n" if name != "ChinaMaxNoIP" else ""))
         for name in ("build.py", "daily.py"):
             self.put("tools/happ/" + name, (ROOT / "tools/happ" / name).read_text())
         self.git("add", ".")
@@ -107,10 +108,11 @@ class DailyTests(unittest.TestCase):
         lite = copy.deepcopy(report)
         lite["selection"] = "explicit"
         lite["categories"] = {}
-        for name in ("ChinaMax", "ChinaMaxNoIP", "ChinaMaxNoMedia"):
+        for name in ("ChinaMaxNoIP", "ChinaIPs", "Lan"):
             path = self.repo / f"rule/Surge/{name}/{name}_All.list"
             lite["categories"][name.lower()] = {**report["categories"]["sample"],
-                                                "input": str(path), "sha256": build.sha256(path)}
+                "input": str(path), "sha256": build.sha256(path),
+                "after_compile": {"geosite": int(name != "ChinaIPs"), "geoip": int(name != "ChinaMaxNoIP")}}
         for name in ("geosite.dat", "geoip.dat"):
             (lite_output / name).write_bytes(b"fixture dat")
         build.write_json(lite_output / "conversion-report.json", lite)
@@ -173,12 +175,12 @@ class DailyTests(unittest.TestCase):
 
     def test_chinaonly_workflow_selects_exact_categories(self):
         command = step_shell("ChinaOnly build with binary readback")
-        self.assertIn("--categories ChinaMax ChinaMaxNoIP ChinaMaxNoMedia \\", command)
+        self.assertIn("--categories ChinaMaxNoIP ChinaIPs Lan \\", command)
         self.assertIn('--output "$OUT/chinaonly"', command)
 
     def test_chinaonly_failure_prevents_commit(self):
         daily.snapshot(self.source)
-        for mutation in ("missing", "artifact", "selection", "category", "missing_category", "source", "readback"):
+        for mutation in ("missing", "artifact", "selection", "category", "missing_category", "source", "geosite_labels", "geoip_labels", "readback"):
             with self.subTest(mutation=mutation):
                 self.report()
                 folder = self.output / "chinaonly"
@@ -192,11 +194,15 @@ class DailyTests(unittest.TestCase):
                     if mutation == "selection":
                         report["selection"] = "all"
                     elif mutation == "category":
-                        report["categories"]["other"] = report["categories"]["chinamax"]
+                        report["categories"]["other"] = report["categories"]["lan"]
                     elif mutation == "missing_category":
                         del report["categories"]["chinamaxnoip"]
                     elif mutation == "source":
-                        report["categories"]["chinamax"]["input"] = str(self.repo / "rule/Surge/Sample/Sample.list")
+                        report["categories"]["lan"]["input"] = str(self.repo / "rule/Surge/Sample/Sample.list")
+                    elif mutation == "geosite_labels":
+                        report["categories"]["chinaips"]["after_compile"]["geosite"] = 1
+                    elif mutation == "geoip_labels":
+                        report["categories"]["chinamaxnoip"]["after_compile"]["geoip"] = 1
                     else:
                         report["validation"]["cidr_coverage"] = "different"
                     build.write_json(path, report)
